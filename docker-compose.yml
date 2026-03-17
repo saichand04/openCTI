@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  opencti-app:
+    build: .
+    container_name: opencti-app
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://opencti:opencti_secret@opencti-db:5432/opencti
+      - OTX_API_KEY=${OTX_API_KEY:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+    depends_on:
+      opencti-db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - opencti-network
+
+  opencti-db:
+    image: postgres:16-alpine
+    container_name: opencti-db
+    environment:
+      POSTGRES_USER: opencti
+      POSTGRES_PASSWORD: opencti_secret
+      POSTGRES_DB: opencti
+    volumes:
+      - opencti-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opencti"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - opencti-network
+
+volumes:
+  opencti-data:
+
+networks:
+  opencti-network:
+    driver: bridge
