@@ -37,24 +37,28 @@ const SEVERITY_ICONS: Record<string, any> = {
   low: Newspaper,
 };
 
-function ReportIframe({ html }: { html: string }) {
-  const iframeRef = useRef<HTMLIFrameElement>(null);
+function ReportPreview({ html }: { html: string }) {
+  // Use srcdoc for sandboxed iframe compatibility (doc.write is blocked in nested sandboxed iframes)
+  const blobUrl = useRef<string | null>(null);
+  const [src, setSrc] = useState<string>("");
+
   useEffect(() => {
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-    const doc = iframe.contentDocument || iframe.contentWindow?.document;
-    if (!doc) return;
-    doc.open();
-    doc.write(html);
-    doc.close();
+    // Create a blob URL from the HTML — works reliably in all iframe contexts
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    blobUrl.current = url;
+    setSrc(url);
+    return () => {
+      if (blobUrl.current) URL.revokeObjectURL(blobUrl.current);
+    };
   }, [html]);
+
   return (
     <iframe
-      ref={iframeRef}
+      src={src}
       className="w-full flex-1 min-h-0"
       style={{ minHeight: '70vh', border: 'none', background: '#f4f4f4' }}
       title="Advisory Report Preview"
-      sandbox="allow-same-origin"
     />
   );
 }
@@ -97,7 +101,7 @@ function ReportPreviewButton() {
               <span className="text-sm font-semibold text-gray-800">Advisory Report Preview</span>
               <button onClick={() => setShowPreview(false)} className="text-xs text-gray-500 hover:text-gray-800 px-3 py-1 rounded-full border border-gray-300">Close</button>
             </div>
-            <ReportIframe html={reportHtml} />
+            <ReportPreview html={reportHtml} />
           </div>
         </div>
       )}
