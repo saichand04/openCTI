@@ -2,6 +2,7 @@ import type { Express } from "express";
 import type { Server } from "http";
 import { storage } from "./storage";
 import type { InsertIndicator } from "@shared/schema";
+import nodemailer from "nodemailer";
 
 // Settings storage (in-memory)
 let platformSettings: Record<string, any> = {
@@ -13,6 +14,14 @@ let platformSettings: Record<string, any> = {
   otxApiKey: process.env.OTX_API_KEY || "",
   lastPurge: null,
   nextPurge: null,
+  // SMTP email settings
+  smtpHost: process.env.SMTP_HOST || "",
+  smtpPort: parseInt(process.env.SMTP_PORT || "587"),
+  smtpSecure: process.env.SMTP_SECURE === "true" || false,
+  smtpUser: process.env.SMTP_USER || "",
+  smtpPass: process.env.SMTP_PASS || "",
+  smtpFromEmail: process.env.SMTP_FROM || "",
+  smtpFromName: process.env.SMTP_FROM_NAME || "OpenCTI Threat Advisory",
 };
 
 async function fetchAndParseFeed(slug: string, url: string, category: string): Promise<InsertIndicator[]> {
@@ -194,6 +203,10 @@ async function searchNewsForIOC(query: string): Promise<any[]> {
 }
 
 export async function registerRoutes(server: Server, app: Express) {
+  // Geo cache — declared at top so auto-fetch, manual fetch-all, and geo endpoint can all access it
+  let geoCache: { data: any[]; timestamp: number } = { data: [], timestamp: 0 };
+  const GEO_CACHE_TTL = 2 * 60 * 1000; // 2 minutes — refresh quickly when new IOCs arrive
+
   // ============ AUTH ============
   app.post("/api/auth/signup", async (req, res) => {
     const { email, name, provider } = req.body;
@@ -306,6 +319,8 @@ export async function registerRoutes(server: Server, app: Express) {
         results.push({ slug: feed.slug, status: "error", error: error.message });
       }
     }
+    // Clear geo cache so map refreshes with new IPs
+    geoCache = { data: [], timestamp: 0 };
     res.json({ results, totalFeeds: enabled.length });
   });
 
@@ -570,13 +585,29 @@ export async function registerRoutes(server: Server, app: Express) {
     }
 
     const articles = advisorCache.articles;
-    const criticalArticles = articles.filter(a => a.severity === 'critical');
-    const highArticles = articles.filter(a => a.severity === 'high');
-    const mediumArticles = articles.filter(a => a.severity === 'medium');
-    const lowArticles = articles.filter(a => a.severity === 'low');
+
+    // Filter to last 24 hours only
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const recentArticles = articles.filter(a => {
+      if (!a.pubDate) return false;
+      try {
+        return new Date(a.pubDate).toISOString() >= oneDayAgo;
+      } catch { return false; }
+    });
+    // Fall back to all articles if none are from today
+    const reportArticles = recentArticles.length > 0 ? recentArticles : articles.slice(0, 20);
+
+    // Sort by severity (critical first, then high, medium, low)
+    const sevOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+    reportArticles.sort((a, b) => (sevOrder[a.severity] ?? 4) - (sevOrder[b.severity] ?? 4));
+
+    const criticalArticles = reportArticles.filter(a => a.severity === 'critical');
+    const highArticles = reportArticles.filter(a => a.severity === 'high');
+    const mediumArticles = reportArticles.filter(a => a.severity === 'medium');
+    const lowArticles = reportArticles.filter(a => a.severity === 'low');
 
     // Pick the top threat for the main advisory
-    const topThreat = criticalArticles[0] || highArticles[0] || articles[0];
+    const topThreat = criticalArticles[0] || highArticles[0] || reportArticles[0];
     if (!topThreat) {
       return res.status(404).json({ error: "No articles available for report" });
     }
@@ -590,13 +621,13 @@ export async function registerRoutes(server: Server, app: Express) {
     const iocSummary = indicators.items.slice(0, 5).map(i => `${i.type.toUpperCase()}: ${i.value}`).join('<br/>');
 
     // Collect source references
-    const sourceLinks = articles.slice(0, 5).map(a => 
+    const sourceLinks = reportArticles.slice(0, 5).map(a => 
       `<a href="${a.link}" style="color: #2980b9; text-decoration: underline;">${a.link}</a>`
     ).join('<br/>');
 
     // Build recommended actions from tags
     const allTags = new Set<string>();
-    articles.slice(0, 20).forEach(a => a.tags?.forEach((t: string) => allTags.add(t)));
+    reportArticles.slice(0, 20).forEach(a => a.tags?.forEach((t: string) => allTags.add(t)));
     const recommendedActions: string[] = [
       'Ensure all security controls are updated with the mentioned IOCs and blocked.',
       'Verify all system dependencies and avoid installing packages from unknown or suspicious publishers.',
@@ -628,7 +659,7 @@ export async function registerRoutes(server: Server, app: Express) {
           </tr>
           <tr>
             <td style="background:#c0392b; padding: 14px 24px;">
-              <h3 style="margin:0; color:#ffffff; font-size:14px; font-weight:bold;">Security Advisory — ${topThreat.title}</h3>
+              <h3 style="margin:0; color:#ffffff; font-size:14px; font-weight:bold;">Daily Threat Digest — ${topThreat.title}</h3>
             </td>
           </tr>
 
@@ -667,7 +698,7 @@ export async function registerRoutes(server: Server, app: Express) {
                   <td style="border: 1px solid #ddd; line-height:1.6;">
                     ${topThreat.description || 'No detailed description available.'}
                     <br/><br/>
-                    <strong>Additional intelligence from OpenCTI:</strong> This advisory consolidates data from ${articles.length} articles across ${new Set(articles.map((a: any) => a.source)).size} cybersecurity news sources.
+                    <strong>Additional intelligence from OpenCTI:</strong> This daily digest consolidates data from ${reportArticles.length} articles across ${new Set(reportArticles.map((a: any) => a.source)).size} cybersecurity news sources.
                     Currently tracking <strong>${criticalArticles.length} critical</strong>, <strong>${highArticles.length} high</strong>, <strong>${mediumArticles.length} medium</strong>, and <strong>${lowArticles.length} low</strong> severity advisories.
                   </td>
                 </tr>
@@ -698,7 +729,7 @@ export async function registerRoutes(server: Server, app: Express) {
                 <tr>
                   <td style="border: 1px solid #ddd; background:#f8f9fa; font-weight:bold; vertical-align:top; width:20%;">Related Threats</td>
                   <td style="border: 1px solid #ddd; line-height:1.8;">
-                    ${articles.slice(1, 6).map((a: any) => {
+                    ${reportArticles.slice(1, 10).map((a: any) => {
                       const sColor = a.severity === 'critical' ? '#c0392b' : a.severity === 'high' ? '#e67e22' : a.severity === 'medium' ? '#27ae60' : '#3498db';
                       return `<div style="margin-bottom:8px;"><span style="background:${sColor}; color:#fff; padding:1px 6px; border-radius:2px; font-size:10px; font-weight:bold; margin-right:6px;">${a.severity.toUpperCase()}</span> <a href="${a.link}" style="color:#2c3e50; text-decoration:none;">${a.title}</a> <span style="color:#999; font-size:11px;">(${a.source})</span></div>`;
                     }).join('')}
@@ -763,9 +794,9 @@ export async function registerRoutes(server: Server, app: Express) {
 
     res.json({
       html,
-      subject: `Security Advisory — ${topThreat.title}`,
+      subject: `OpenCTI Daily Advisory — ${new Date().toLocaleDateString()} — ${criticalArticles.length} Critical, ${highArticles.length} High`,
       summary: {
-        totalArticles: articles.length,
+        totalArticles: reportArticles.length,
         critical: criticalArticles.length,
         high: highArticles.length,
         medium: mediumArticles.length,
@@ -811,6 +842,184 @@ export async function registerRoutes(server: Server, app: Express) {
     await storage.purgeOldIndicators(cutoff.toISOString());
     platformSettings.lastPurge = new Date().toISOString();
   }, 24 * 60 * 60 * 1000);
+
+  // Auto-fetch feeds every 15 minutes
+  async function autoFetchAllFeeds() {
+    try {
+      const feeds = await storage.getFeeds();
+      const enabled = feeds.filter(f => f.enabled);
+      let totalNew = 0;
+      for (const feed of enabled) {
+        try {
+          await storage.updateFeed(feed.id, { status: "fetching" });
+          const indicators = await fetchAndParseFeed(feed.slug, feed.url, feed.category);
+          await storage.deleteIndicatorsBySource(feed.slug);
+          const count = await storage.createIndicatorsBatch(indicators);
+          await storage.updateFeed(feed.id, { status: "success", lastFetched: new Date().toISOString(), iocCount: count, errorMessage: null });
+          totalNew += count;
+        } catch (error: any) {
+          await storage.updateFeed(feed.id, { status: "error", errorMessage: error.message });
+        }
+      }
+      // Clear geo cache so map refreshes with new IPs
+      geoCache = { data: [], timestamp: 0 };
+      console.log(`[auto-sync] Fetched ${enabled.length} feeds, ${totalNew} indicators`);
+    } catch (err) {
+      console.error("[auto-sync] Error:", err);
+    }
+  }
+
+  // Run initial fetch 30 seconds after startup, then every 15 minutes
+  setTimeout(() => autoFetchAllFeeds(), 30 * 1000);
+  setInterval(() => autoFetchAllFeeds(), 15 * 60 * 1000);
+
+  // ============ GEO THREAT MAP ============
+  app.get("/api/dashboard/geo", async (_req, res) => {
+    const now = Date.now();
+    if (geoCache.data.length > 0 && now - geoCache.timestamp < GEO_CACHE_TTL) {
+      return res.json(geoCache.data);
+    }
+
+    try {
+      const { items } = await storage.getIndicators({ limit: 500 });
+      const ipIndicators = items.filter(i => i.type === "ip" && i.value && !i.value.includes(":"));
+      const uniqueIps = [...new Set(ipIndicators.map(i => i.value))].slice(0, 100);
+
+      if (uniqueIps.length === 0) {
+        geoCache = { data: [], timestamp: now };
+        return res.json([]);
+      }
+
+      // Batch lookup using ip-api.com (free, up to 100 per request, 15 req/min)
+      const batchBody = uniqueIps.map(ip => ({ query: ip, fields: "query,country,countryCode,city,lat,lon,status" }));
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+
+      const geoRes = await fetch("http://ip-api.com/batch?fields=query,country,countryCode,city,lat,lon,status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(batchBody),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      const geoResults = await geoRes.json();
+
+      // Map severity from our indicators
+      const ipSeverityMap = new Map<string, { severity: string; source: string }>();
+      ipIndicators.forEach(i => {
+        if (!ipSeverityMap.has(i.value)) {
+          ipSeverityMap.set(i.value, { severity: i.severity, source: i.source });
+        }
+      });
+
+      const mapped = geoResults
+        .filter((g: any) => g.status === "success" && g.lat && g.lon)
+        .map((g: any) => ({
+          ip: g.query,
+          lat: g.lat,
+          lon: g.lon,
+          country: g.country,
+          city: g.city || "Unknown",
+          severity: ipSeverityMap.get(g.query)?.severity || "medium",
+          source: ipSeverityMap.get(g.query)?.source || "unknown",
+        }));
+
+      geoCache = { data: mapped, timestamp: now };
+      res.json(mapped);
+    } catch (err) {
+      console.error("Geo lookup error:", err);
+      res.json(geoCache.data.length > 0 ? geoCache.data : []);
+    }
+  });
+
+  // ============ EMAIL / SMTP ============
+
+  // Test SMTP connection
+  app.post("/api/settings/smtp-test", async (req, res) => {
+    const { smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, smtpFromEmail } = platformSettings;
+    if (!smtpHost || !smtpUser) {
+      return res.status(400).json({ error: "SMTP host and username are required. Configure them in Settings first." });
+    }
+    try {
+      const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: smtpPort || 587,
+        secure: smtpSecure || false,
+        auth: { user: smtpUser, pass: smtpPass },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+      });
+      await transporter.verify();
+      res.json({ success: true, message: "SMTP connection verified successfully" });
+    } catch (err: any) {
+      res.status(400).json({ error: `SMTP connection failed: ${err.message}` });
+    }
+  });
+
+  // Send advisory report via email
+  app.post("/api/threat-advisor/send-report", async (req, res) => {
+    const { smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, smtpFromEmail, smtpFromName } = platformSettings;
+    if (!smtpHost || !smtpUser) {
+      return res.status(400).json({ error: "SMTP not configured. Go to Settings to set up your email server." });
+    }
+
+    const subscriberList = Array.from(subscribers);
+    if (subscriberList.length === 0) {
+      return res.status(400).json({ error: "No subscribers. Add subscriber emails from the Threat Advisor page first." });
+    }
+
+    try {
+      // Generate the report HTML
+      if (advisorCache.articles.length === 0) {
+        advisorCache.articles = await fetchThreatAdvisorArticles();
+        advisorCache.lastFetched = new Date().toISOString();
+      }
+      const articles = advisorCache.articles;
+      const topThreat = articles.find(a => a.severity === 'critical') || articles.find(a => a.severity === 'high') || articles[0];
+      if (!topThreat) {
+        return res.status(404).json({ error: "No articles available for report" });
+      }
+
+      // Fetch the full report HTML from our own endpoint
+      const reportUrl = `http://127.0.0.1:${process.env.PORT || 5000}/api/threat-advisor/report`;
+      const reportRes = await fetch(reportUrl);
+      const reportData = await reportRes.json();
+      const html = reportData.html;
+      const subject = reportData.subject || `OpenCTI Security Advisory — ${topThreat.title}`;
+
+      // Create transporter
+      const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: smtpPort || 587,
+        secure: smtpSecure || false,
+        auth: { user: smtpUser, pass: smtpPass },
+        connectionTimeout: 15000,
+      });
+
+      // Send to all subscribers
+      const results: Array<{ email: string; status: string; error?: string }> = [];
+      for (const email of subscriberList) {
+        try {
+          await transporter.sendMail({
+            from: `"${smtpFromName}" <${smtpFromEmail || smtpUser}>`,
+            to: email,
+            subject,
+            html,
+          });
+          results.push({ email, status: "sent" });
+        } catch (err: any) {
+          results.push({ email, status: "failed", error: err.message });
+        }
+      }
+
+      const sent = results.filter(r => r.status === "sent").length;
+      const failed = results.filter(r => r.status === "failed").length;
+      res.json({ success: true, sent, failed, total: subscriberList.length, results });
+    } catch (err: any) {
+      res.status(500).json({ error: `Failed to send report: ${err.message}` });
+    }
+  });
 
   // ============ SYSTEM INFO ============
   app.get("/api/system/info", async (_req, res) => {

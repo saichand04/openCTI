@@ -117,27 +117,23 @@ function SendReportButton() {
   const handleSend = async () => {
     setSending(true);
     try {
-      const res = await apiRequest("GET", "/api/threat-advisor/report");
+      const res = await apiRequest("POST", "/api/threat-advisor/send-report");
       const data = await res.json();
-      const subscriberList = data.subscribers || [];
 
-      if (subscriberList.length === 0) {
-        toast({ title: "No subscribers", description: "No one has subscribed yet. Add subscriber emails from the form above.", variant: "destructive" });
+      if (data.error) {
+        toast({ title: "Send failed", description: data.error, variant: "destructive" });
         setSending(false);
         return;
       }
 
-      // Store the report data so the platform can send it
-      // In a real system this would call an email API
-      // Here we store it and show the user what would be sent
-      toast({
-        title: "Advisory report ready",
-        description: `Report generated for ${subscriberList.length} subscriber(s): ${subscriberList.join(', ')}. Use the platform email integration to send.`,
-      });
+      const msg = data.failed > 0
+        ? `Sent to ${data.sent} of ${data.total} subscribers (${data.failed} failed).`
+        : `Advisory report sent to ${data.sent} subscriber(s).`;
+      toast({ title: "Report sent", description: msg });
       setSent(true);
       setTimeout(() => setSent(false), 3000);
     } catch (e: any) {
-      toast({ title: "Error", description: e.message || "Failed to prepare report", variant: "destructive" });
+      toast({ title: "Error", description: e.message || "Failed to send report. Check SMTP settings.", variant: "destructive" });
     } finally {
       setSending(false);
     }

@@ -9,7 +9,6 @@ import Dashboard from "@/pages/dashboard";
 import Feeds from "@/pages/feeds";
 import Indicators from "@/pages/indicators";
 import Lookup from "@/pages/lookup";
-import ApiAccess from "@/pages/api-access";
 import ThreatAdvisor from "@/pages/threat-advisor";
 import Settings from "@/pages/settings";
 import NotFound from "@/pages/not-found";
@@ -18,7 +17,6 @@ import {
   Rss,
   Database,
   Search,
-  Key,
   Sun,
   Moon,
   LogOut,
@@ -84,7 +82,6 @@ function IconSidebar() {
     { href: "/indicators", icon: Database, label: "IOCs" },
     { href: "/lookup", icon: Search, label: "Lookup" },
     { href: "/threat-advisor", icon: Brain, label: "Advisor" },
-    { href: "/api-access", icon: Key, label: "API" },
   ];
 
   // Add settings nav item for admin users
@@ -195,7 +192,6 @@ function AppLayout() {
             <Route path="/indicators" component={Indicators} />
             <Route path="/lookup" component={Lookup} />
             <Route path="/threat-advisor" component={ThreatAdvisor} />
-            <Route path="/api-access" component={ApiAccess} />
             <Route path="/settings" component={Settings} />
             <Route component={NotFound} />
           </Switch>

@@ -4,7 +4,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Database, Search, Filter, ChevronLeft, ChevronRight,
-  Server, Globe, Link2, Hash, ShieldAlert
+  Server, Globe, Link2, Hash, ShieldAlert, Download
 } from "lucide-react";
 import type { Indicator } from "@shared/schema";
 
@@ -48,6 +48,47 @@ export default function Indicators() {
   });
 
   const totalPages = Math.ceil((data?.total || 0) / limit);
+
+  const exportIOCs = async (format: "csv" | "txt") => {
+    const params = new URLSearchParams();
+    params.set("limit", "10000");
+    params.set("offset", "0");
+    if (search) params.set("search", search);
+    if (typeFilter) params.set("type", typeFilter);
+    if (sevFilter) params.set("severity", sevFilter);
+
+    const res = await apiRequest("GET", `/api/indicators?${params.toString()}`);
+    const exportData = await res.json();
+    const items = exportData.items || [];
+
+    let content: string;
+    let mimeType: string;
+    let ext: string;
+
+    if (format === "csv") {
+      const headers = "Type,Value,Source,Severity,Confidence,Tags,First Seen,Last Seen";
+      const rows = items.map((i: any) =>
+        `${i.type},"${i.value}",${i.source},${i.severity},${i.confidence},"${(i.tags || []).join(';')}",${i.firstSeen || ''},${i.lastSeen || ''}`
+      );
+      content = [headers, ...rows].join("\n");
+      mimeType = "text/csv";
+      ext = "csv";
+    } else {
+      content = items.map((i: any) => i.value).join("\n");
+      mimeType = "text/plain";
+      ext = "txt";
+    }
+
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `opencti-iocs-${new Date().toISOString().split('T')[0]}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="space-y-5" data-testid="indicators-page">
@@ -100,6 +141,12 @@ export default function Indicators() {
             <option value="low">Low</option>
           </select>
         </div>
+        <button onClick={() => exportIOCs("csv")} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-full border border-border text-xs font-medium hover:bg-accent transition-colors" data-testid="export-csv">
+          <Download size={12} /> CSV
+        </button>
+        <button onClick={() => exportIOCs("txt")} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-full border border-border text-xs font-medium hover:bg-accent transition-colors" data-testid="export-txt">
+          <Download size={12} /> TXT
+        </button>
       </div>
 
       {/* Table */}

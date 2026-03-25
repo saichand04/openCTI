@@ -11,6 +11,13 @@ services:
       - DATABASE_URL=postgresql://opencti:opencti_secret@opencti-db:5432/opencti
       - OTX_API_KEY=${OTX_API_KEY:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_FROM_NAME=${SMTP_FROM_NAME:-OpenCTI Threat Advisory}
     depends_on:
       opencti-db:
         condition: service_healthy

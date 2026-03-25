@@ -5,12 +5,44 @@ import { useAuth } from "@/App";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Shield, Database, Rss, AlertTriangle, RefreshCw, Activity,
-  TrendingUp, TrendingDown, Search, Clock
+  TrendingUp, TrendingDown, Search, Clock, GripVertical
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell,
 } from "recharts";
+import { useState, useEffect, useRef } from "react";
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import type { DragEndEvent } from "@dnd-kit/core";
+import { SortableContext, verticalListSortingStrategy, arrayMove, useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import L from "leaflet";
+
+const DEFAULT_CARD_ORDER = ["kpis", "sankey", "threatmap", "charts", "recent"];
+
+// Sortable card wrapper
+function SortableCard({ id, children }: { id: string; children: React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    position: "relative" as const,
+  };
+  return (
+    <div ref={setNodeRef} style={style}>
+      <div
+        {...attributes}
+        {...listeners}
+        className="absolute top-3 left-3 z-10 p-1 rounded cursor-grab active:cursor-grabbing text-muted-foreground/30 hover:text-muted-foreground/70 transition-colors"
+        title="Drag to reorder"
+      >
+        <GripVertical size={16} />
+      </div>
+      {children}
+    </div>
+  );
+}
 
 // Mini sparkline SVG
 function Sparkline({ data, color = "hsl(160 75% 45%)" }: { data: number[]; color?: string }) {
@@ -175,12 +207,161 @@ function SankeyChart({ stats }: { stats: any }) {
   );
 }
 
+// Threat Map severity colors (hex for Leaflet)
+const SEVERITY_MAP_COLORS: Record<string, string> = {
+  critical: "#ef4444",
+  high: "#f59e0b",
+  medium: "#22c55e",
+  low: "#3b82f6",
+};
+
+const DARK_TILES = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+const LIGHT_TILES = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png";
+
+function ThreatMap() {
+  const mapRef = useRef<HTMLDivElement>(null);
+  const mapInstance = useRef<L.Map | null>(null);
+  const tileLayerRef = useRef<L.TileLayer | null>(null);
+
+  const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains('dark'));
+
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setIsDark(document.documentElement.classList.contains('dark'));
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
+
+  const { data: geoData } = useQuery<any[]>({
+    queryKey: ["/api/dashboard/geo"],
+    refetchInterval: 120000, // refresh every 2 minutes
+  });
+
+  useEffect(() => {
+    if (!mapRef.current || mapInstance.current) return;
+
+    const map = L.map(mapRef.current, {
+      center: [20, 0],
+      zoom: 2,
+      minZoom: 2,
+      maxZoom: 10,
+      zoomControl: true,
+      attributionControl: false,
+      scrollWheelZoom: true,
+    });
+
+    mapInstance.current = map;
+
+    return () => {
+      map.remove();
+      mapInstance.current = null;
+    };
+  }, []);
+
+  // Swap tile layer when theme changes
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map) return;
+
+    if (tileLayerRef.current) {
+      map.removeLayer(tileLayerRef.current);
+    }
+
+    tileLayerRef.current = L.tileLayer(isDark ? DARK_TILES : LIGHT_TILES, {
+      subdomains: "abcd",
+    }).addTo(map);
+  }, [isDark]);
+
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map || !geoData?.length) return;
+
+    // Clear existing markers
+    map.eachLayer((layer) => {
+      if (layer instanceof L.CircleMarker) map.removeLayer(layer);
+    });
+
+    geoData.forEach((point: any) => {
+      const color = SEVERITY_MAP_COLORS[point.severity] || "#22c55e";
+      L.circleMarker([point.lat, point.lon], {
+        radius: point.severity === "critical" ? 7 : point.severity === "high" ? 6 : 5,
+        fillColor: color,
+        color: color,
+        weight: 1,
+        opacity: 0.8,
+        fillOpacity: 0.6,
+      })
+        .bindPopup(
+          `<div style="font-family:Inter,sans-serif;font-size:12px;line-height:1.6;">
+            <strong>${point.ip}</strong><br/>
+            ${point.city}, ${point.country}<br/>
+            <span style="color:${color};font-weight:600;">${point.severity.toUpperCase()}</span> · ${point.source}
+          </div>`,
+          { className: "threat-popup" }
+        )
+        .addTo(map);
+    });
+  }, [geoData]);
+
+  return (
+    <div className="rounded border border-border bg-card p-5 glow-card">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-sm font-semibold">Global Threat Map</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            IP indicators mapped to geographic locations
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {Object.entries(SEVERITY_MAP_COLORS).map(([sev, color]) => (
+            <div key={sev} className="flex items-center gap-1 text-[10px] text-muted-foreground">
+              <span className="w-2 h-2 rounded-full" style={{ background: color }} />
+              <span className="capitalize">{sev}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="relative">
+        <div
+          ref={mapRef}
+          className="w-full rounded overflow-hidden"
+          style={{ height: 350 }}
+          data-testid="threat-map"
+        />
+        {(!geoData || geoData.length === 0) && (
+          <div className="absolute inset-0 flex items-center justify-center bg-card/80 rounded" data-testid="map-empty-state">
+            <p className="text-sm text-muted-foreground">No IP indicators yet. Fetch feeds to populate the map.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { toast } = useToast();
   const { user } = useAuth();
   const { data: stats, isLoading } = useQuery<any>({
     queryKey: ["/api/dashboard/stats"],
   });
+
+  const [cardOrder, setCardOrder] = useState(DEFAULT_CARD_ORDER);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  );
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (over && active.id !== over.id) {
+      setCardOrder((prev) => {
+        const oldIndex = prev.indexOf(active.id as string);
+        const newIndex = prev.indexOf(over.id as string);
+        return arrayMove(prev, oldIndex, newIndex);
+      });
+    }
+  }
 
   const fetchAllMut = useMutation({
     mutationFn: () => apiRequest("POST", "/api/feeds/fetch-all"),
@@ -221,6 +402,201 @@ export default function Dashboard() {
     ? Object.entries(stats.bySeverity).map(([name, value]) => ({ name, value, fill: SEVERITY_COLORS[name] || "hsl(155 6% 50%)" }))
     : [];
 
+  function renderCard(cardId: string) {
+    switch (cardId) {
+      case "kpis":
+        return (
+          <SortableCard key="kpis" id="kpis">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <KpiCard
+                title="Total IOCs"
+                value={stats?.totalIocs?.toLocaleString() || "0"}
+                subtitle="All sources"
+                sparkData={sparkGen(stats?.totalIocs || 100)}
+                trend={{ value: "Active", up: true }}
+                icon={Database}
+                color="hsl(160 75% 45%)"
+              />
+              <KpiCard
+                title="Active Sources"
+                value={stats?.activeSources || 0}
+                subtitle={`of ${stats?.totalFeeds || 0} feeds`}
+                sparkData={sparkGen(stats?.activeSources || 5)}
+                trend={{ value: `${stats?.enabledFeeds || 0} enabled`, up: true }}
+                icon={Rss}
+                color="hsl(200 70% 55%)"
+              />
+              <KpiCard
+                title="Threat Level"
+                value={stats?.bySeverity?.critical || 0}
+                subtitle="Critical severity"
+                sparkData={sparkGen(stats?.bySeverity?.critical || 10)}
+                trend={{ value: "Critical", up: false }}
+                icon={AlertTriangle}
+                color="hsl(0 65% 55%)"
+              />
+              <KpiCard
+                title="Searches"
+                value={stats?.recentSearches?.length || 0}
+                subtitle="Recent queries"
+                sparkData={sparkGen(stats?.recentSearches?.length || 3)}
+                icon={Search}
+                color="hsl(280 60% 60%)"
+              />
+            </div>
+          </SortableCard>
+        );
+      case "sankey":
+        return (
+          <SortableCard key="sankey" id="sankey">
+            <SankeyChart stats={stats} />
+          </SortableCard>
+        );
+      case "threatmap":
+        return (
+          <SortableCard key="threatmap" id="threatmap">
+            <ThreatMap />
+          </SortableCard>
+        );
+      case "charts":
+        return (
+          <SortableCard key="charts" id="charts">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              {/* Area chart */}
+              <div className="rounded border border-border bg-card p-5 lg:col-span-2 glow-card">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h2 className="text-sm font-semibold">IOCs by Source</h2>
+                    <p className="text-xs text-muted-foreground mt-0.5">Distribution across all active feeds</p>
+                  </div>
+                  <Activity size={16} className="text-muted-foreground" />
+                </div>
+                {sourceData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={240}>
+                    <AreaChart data={sourceData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="hsl(160 75% 45%)" stopOpacity={0.3} />
+                          <stop offset="95%" stopColor="hsl(160 75% 45%)" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <XAxis dataKey="name" tick={{ fontSize: 10, fill: "hsl(155 6% 50%)" }} axisLine={false} tickLine={false} interval={0} angle={-30} textAnchor="end" height={50} />
+                      <YAxis tick={{ fontSize: 10, fill: "hsl(155 6% 50%)" }} axisLine={false} tickLine={false} />
+                      <Tooltip
+                        contentStyle={{ background: "hsl(160 12% 8%)", border: "1px solid hsl(160 10% 13%)", borderRadius: "4px", fontSize: "12px", color: "hsl(155 12% 88%)" }}
+                        labelStyle={{ color: "hsl(155 6% 50%)" }}
+                      />
+                      <Area type="monotone" dataKey="count" stroke="hsl(160 75% 45%)" fill="url(#areaGrad)" strokeWidth={2} dot={false} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-60 flex items-center justify-center text-sm text-muted-foreground">
+                    Fetch feeds to see data
+                  </div>
+                )}
+              </div>
+
+              {/* Severity pie */}
+              <div className="rounded border border-border bg-card p-5 glow-card">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h2 className="text-sm font-semibold">By Severity</h2>
+                    <p className="text-xs text-muted-foreground mt-0.5">IOC distribution</p>
+                  </div>
+                  <Shield size={16} className="text-muted-foreground" />
+                </div>
+                {sevData.length > 0 ? (
+                  <>
+                    <ResponsiveContainer width="100%" height={160}>
+                      <PieChart>
+                        <Pie data={sevData} cx="50%" cy="50%" innerRadius={40} outerRadius={65} paddingAngle={3} dataKey="value" strokeWidth={0}>
+                          {sevData.map((entry, i) => (
+                            <Cell key={i} fill={entry.fill} />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          contentStyle={{ background: "hsl(160 12% 8%)", border: "1px solid hsl(160 10% 13%)", borderRadius: "4px", fontSize: "12px", color: "#ffffff" }}
+                          itemStyle={{ color: "#ffffff" }}
+                          labelStyle={{ color: "#ffffff" }}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="flex flex-wrap gap-3 mt-2">
+                      {sevData.map((s) => (
+                        <div key={s.name} className="flex items-center gap-1.5 text-xs">
+                          <span className="w-2 h-2 rounded-full" style={{ background: s.fill }} />
+                          <span className="capitalize text-muted-foreground">{s.name}</span>
+                          <span className="font-medium tabular-nums">{s.value as number}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="h-48 flex items-center justify-center text-sm text-muted-foreground">
+                    No data yet
+                  </div>
+                )}
+              </div>
+            </div>
+          </SortableCard>
+        );
+      case "recent":
+        return (
+          <SortableCard key="recent" id="recent">
+            <div className="rounded border border-border bg-card p-5 glow-card">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-sm font-semibold">Recent Indicators</h2>
+                <Clock size={16} className="text-muted-foreground" />
+              </div>
+              {stats?.recentIndicators?.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-xs text-muted-foreground border-b border-border">
+                        <th className="text-left py-2 pr-4 font-medium">Value</th>
+                        <th className="text-left py-2 pr-4 font-medium">Type</th>
+                        <th className="text-left py-2 pr-4 font-medium">Source</th>
+                        <th className="text-left py-2 pr-4 font-medium">Severity</th>
+                        <th className="text-left py-2 font-medium">Confidence</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stats.recentIndicators.slice(0, 8).map((ind: any) => (
+                        <tr key={ind.id} className="border-b border-border/50 last:border-0">
+                          <td className="py-2 pr-4 font-mono-ioc truncate max-w-[240px]" title={ind.value}>{ind.value}</td>
+                          <td className="py-2 pr-4">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-primary/10 text-primary">{ind.type}</span>
+                          </td>
+                          <td className="py-2 pr-4 text-muted-foreground">{ind.source}</td>
+                          <td className="py-2 pr-4">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              ind.severity === "critical" ? "bg-red-500/10 text-red-400" :
+                              ind.severity === "high" ? "bg-amber-500/10 text-amber-400" :
+                              ind.severity === "medium" ? "bg-primary/10 text-primary" :
+                              "bg-emerald-500/10 text-emerald-400"
+                            }`}>
+                              {ind.severity}
+                            </span>
+                          </td>
+                          <td className="py-2 tabular-nums">{ind.confidence}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="py-8 text-center text-sm text-muted-foreground">
+                  No indicators yet. Click "Fetch All Feeds" to load threat data.
+                </div>
+              )}
+            </div>
+          </SortableCard>
+        );
+      default:
+        return null;
+    }
+  }
+
   return (
     <div className="space-y-5" data-testid="dashboard-page">
       {/* Header */}
@@ -239,175 +615,13 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* KPI cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard
-          title="Total IOCs"
-          value={stats?.totalIocs?.toLocaleString() || "0"}
-          subtitle="All sources"
-          sparkData={sparkGen(stats?.totalIocs || 100)}
-          trend={{ value: "Active", up: true }}
-          icon={Database}
-          color="hsl(160 75% 45%)"
-        />
-        <KpiCard
-          title="Active Sources"
-          value={stats?.activeSources || 0}
-          subtitle={`of ${stats?.totalFeeds || 0} feeds`}
-          sparkData={sparkGen(stats?.activeSources || 5)}
-          trend={{ value: `${stats?.enabledFeeds || 0} enabled`, up: true }}
-          icon={Rss}
-          color="hsl(200 70% 55%)"
-        />
-        <KpiCard
-          title="Threat Level"
-          value={stats?.bySeverity?.critical || 0}
-          subtitle="Critical severity"
-          sparkData={sparkGen(stats?.bySeverity?.critical || 10)}
-          trend={{ value: "Critical", up: false }}
-          icon={AlertTriangle}
-          color="hsl(0 65% 55%)"
-        />
-        <KpiCard
-          title="Searches"
-          value={stats?.recentSearches?.length || 0}
-          subtitle="Recent queries"
-          sparkData={sparkGen(stats?.recentSearches?.length || 3)}
-          icon={Search}
-          color="hsl(280 60% 60%)"
-        />
-      </div>
-
-      {/* Sankey chart */}
-      <SankeyChart stats={stats} />
-
-      {/* Charts row */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Area chart */}
-        <div className="rounded border border-border bg-card p-5 lg:col-span-2 glow-card">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-sm font-semibold">IOCs by Source</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">Distribution across all active feeds</p>
-            </div>
-            <Activity size={16} className="text-muted-foreground" />
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <SortableContext items={cardOrder} strategy={verticalListSortingStrategy}>
+          <div className="space-y-5">
+            {cardOrder.map((cardId) => renderCard(cardId))}
           </div>
-          {sourceData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={240}>
-              <AreaChart data={sourceData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="hsl(160 75% 45%)" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="hsl(160 75% 45%)" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <XAxis dataKey="name" tick={{ fontSize: 10, fill: "hsl(155 6% 50%)" }} axisLine={false} tickLine={false} interval={0} angle={-30} textAnchor="end" height={50} />
-                <YAxis tick={{ fontSize: 10, fill: "hsl(155 6% 50%)" }} axisLine={false} tickLine={false} />
-                <Tooltip
-                  contentStyle={{ background: "hsl(160 12% 8%)", border: "1px solid hsl(160 10% 13%)", borderRadius: "4px", fontSize: "12px", color: "hsl(155 12% 88%)" }}
-                  labelStyle={{ color: "hsl(155 6% 50%)" }}
-                />
-                <Area type="monotone" dataKey="count" stroke="hsl(160 75% 45%)" fill="url(#areaGrad)" strokeWidth={2} dot={false} />
-              </AreaChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-60 flex items-center justify-center text-sm text-muted-foreground">
-              Fetch feeds to see data
-            </div>
-          )}
-        </div>
-
-        {/* Severity pie */}
-        <div className="rounded border border-border bg-card p-5 glow-card">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-sm font-semibold">By Severity</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">IOC distribution</p>
-            </div>
-            <Shield size={16} className="text-muted-foreground" />
-          </div>
-          {sevData.length > 0 ? (
-            <>
-              <ResponsiveContainer width="100%" height={160}>
-                <PieChart>
-                  <Pie data={sevData} cx="50%" cy="50%" innerRadius={40} outerRadius={65} paddingAngle={3} dataKey="value" strokeWidth={0}>
-                    {sevData.map((entry, i) => (
-                      <Cell key={i} fill={entry.fill} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    contentStyle={{ background: "hsl(160 12% 8%)", border: "1px solid hsl(160 10% 13%)", borderRadius: "4px", fontSize: "12px", color: "#ffffff" }}
-                    itemStyle={{ color: "#ffffff" }}
-                    labelStyle={{ color: "#ffffff" }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-              <div className="flex flex-wrap gap-3 mt-2">
-                {sevData.map((s) => (
-                  <div key={s.name} className="flex items-center gap-1.5 text-xs">
-                    <span className="w-2 h-2 rounded-full" style={{ background: s.fill }} />
-                    <span className="capitalize text-muted-foreground">{s.name}</span>
-                    <span className="font-medium tabular-nums">{s.value as number}</span>
-                  </div>
-                ))}
-              </div>
-            </>
-          ) : (
-            <div className="h-48 flex items-center justify-center text-sm text-muted-foreground">
-              No data yet
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Recent indicators */}
-      <div className="rounded border border-border bg-card p-5 glow-card">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold">Recent Indicators</h2>
-          <Clock size={16} className="text-muted-foreground" />
-        </div>
-        {stats?.recentIndicators?.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-xs text-muted-foreground border-b border-border">
-                  <th className="text-left py-2 pr-4 font-medium">Value</th>
-                  <th className="text-left py-2 pr-4 font-medium">Type</th>
-                  <th className="text-left py-2 pr-4 font-medium">Source</th>
-                  <th className="text-left py-2 pr-4 font-medium">Severity</th>
-                  <th className="text-left py-2 font-medium">Confidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.recentIndicators.slice(0, 8).map((ind: any) => (
-                  <tr key={ind.id} className="border-b border-border/50 last:border-0">
-                    <td className="py-2 pr-4 font-mono-ioc truncate max-w-[240px]" title={ind.value}>{ind.value}</td>
-                    <td className="py-2 pr-4">
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-primary/10 text-primary">{ind.type}</span>
-                    </td>
-                    <td className="py-2 pr-4 text-muted-foreground">{ind.source}</td>
-                    <td className="py-2 pr-4">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                        ind.severity === "critical" ? "bg-red-500/10 text-red-400" :
-                        ind.severity === "high" ? "bg-amber-500/10 text-amber-400" :
-                        ind.severity === "medium" ? "bg-primary/10 text-primary" :
-                        "bg-emerald-500/10 text-emerald-400"
-                      }`}>
-                        {ind.severity}
-                      </span>
-                    </td>
-                    <td className="py-2 tabular-nums">{ind.confidence}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="py-8 text-center text-sm text-muted-foreground">
-            No indicators yet. Click "Fetch All Feeds" to load threat data.
-          </div>
-        )}
-      </div>
+        </SortableContext>
+      </DndContext>
     </div>
   );
 }
