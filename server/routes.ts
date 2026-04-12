@@ -1,8 +1,14 @@
 import type { Express } from "express";
 import type { Server } from "http";
-import { storage } from "./storage";
+import { storage, verifyPassword } from "./storage";
 import type { InsertIndicator } from "@shared/schema";
 import nodemailer from "nodemailer";
+
+// Helper to sanitize user (remove password from responses)
+function sanitizeUser(user: any) {
+  const { password, ...safe } = user;
+  return safe;
+}
 
 // Settings storage (in-memory)
 let platformSettings: Record<string, any> = {
@@ -124,7 +130,7 @@ async function fetchAndParseFeed(slug: string, url: string, category: string): P
       }
       case 'otx-alienvault': {
         const otxKey = platformSettings.otxApiKey || '';
-        if (!otxKey) break;
+        if (!otxKey) throw new Error("OTX API key not configured. Add your key in Settings → AlienVault OTX API Key.");
         const otxRes = await fetch('https://otx.alienvault.com/api/v1/pulses/subscribed?limit=10&page=1', {
           headers: { 'X-OTX-API-KEY': otxKey, 'User-Agent': 'OpenCTI/3.0' },
           signal: controller.signal,
@@ -212,9 +218,9 @@ export async function registerRoutes(server: Server, app: Express) {
     const { email, name, provider } = req.body;
     if (!email) return res.status(400).json({ error: "Email required" });
     const existing = await storage.getUserByEmail(email);
-    if (existing) return res.status(409).json({ error: "User exists", user: existing });
+    if (existing) return res.status(409).json({ error: "User exists", user: sanitizeUser(existing) });
     const user = await storage.createUser({ email, name: name || email.split('@')[0], provider: provider || "email", createdAt: new Date().toISOString() });
-    res.json(user);
+    res.json(sanitizeUser(user));
   });
 
   app.post("/api/auth/signin", async (req, res) => {
@@ -224,7 +230,7 @@ export async function registerRoutes(server: Server, app: Express) {
     if (!user) {
       user = await storage.createUser({ email, name: email.split('@')[0], provider: provider || "email", createdAt: new Date().toISOString() });
     }
-    res.json(user);
+    res.json(sanitizeUser(user));
   });
 
   app.post("/api/auth/admin-login", async (req, res) => {
@@ -232,12 +238,27 @@ export async function registerRoutes(server: Server, app: Express) {
     if (!username || !password) return res.status(400).json({ error: "Username and password required" });
     const user = await storage.getUserByEmail(username);
     if (!user || user.role !== "admin") return res.status(401).json({ error: "Invalid credentials" });
-    if (user.password !== password) return res.status(401).json({ error: "Invalid credentials" });
-    res.json(user);
+    if (!user.password || !verifyPassword(password, user.password)) return res.status(401).json({ error: "Invalid credentials" });
+    res.json(sanitizeUser(user));
   });
 
+  app.get("/api/auth/me", async (req, res) => {
+    const userId = req.query.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+    const user = await storage.getUser(parseInt(userId as string));
+    if (!user) return res.status(401).json({ error: "User not found" });
+    res.json(sanitizeUser(user));
+  });
+
+  // Simple auth check middleware for internal APIs
+  function requireAuth(req: any, res: any, next: any) {
+    const userId = req.headers["x-user-id"];
+    if (!userId) return res.status(401).json({ error: "Authentication required" });
+    next();
+  }
+
   // ============ API KEY ============
-  app.post("/api/keys/generate", async (req, res) => {
+  app.post("/api/keys/generate", requireAuth, async (req, res) => {
     const { userId } = req.body;
     if (!userId) return res.status(400).json({ error: "userId required" });
     try {
@@ -259,14 +280,14 @@ export async function registerRoutes(server: Server, app: Express) {
     if (!feed) return res.status(404).json({ error: "Feed not found" });
     res.json(feed);
   });
-  app.patch("/api/feeds/:id/toggle", async (req, res) => {
+  app.patch("/api/feeds/:id/toggle", requireAuth, async (req, res) => {
     const feed = await storage.getFeed(parseInt(req.params.id));
     if (!feed) return res.status(404).json({ error: "Feed not found" });
     res.json(await storage.updateFeed(feed.id, { enabled: !feed.enabled }));
   });
 
   // Add new custom feed
-  app.post("/api/feeds", async (req, res) => {
+  app.post("/api/feeds", requireAuth, async (req, res) => {
     const { name, url, category, description } = req.body;
     if (!name || !url) return res.status(400).json({ error: "Name and URL required" });
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -276,7 +297,7 @@ export async function registerRoutes(server: Server, app: Express) {
     res.json(feed);
   });
 
-  app.delete("/api/feeds/:id", async (req, res) => {
+  app.delete("/api/feeds/:id", requireAuth, async (req, res) => {
     const feed = await storage.getFeed(parseInt(req.params.id));
     if (!feed) return res.status(404).json({ error: "Feed not found" });
     await storage.deleteIndicatorsBySource(feed.slug);
@@ -285,7 +306,7 @@ export async function registerRoutes(server: Server, app: Express) {
   });
 
   // Fetch single feed
-  app.post("/api/feeds/:id/fetch", async (req, res) => {
+  app.post("/api/feeds/:id/fetch", requireAuth, async (req, res) => {
     const feed = await storage.getFeed(parseInt(req.params.id));
     if (!feed) return res.status(404).json({ error: "Feed not found" });
     await storage.updateFeed(feed.id, { status: "fetching" });
@@ -302,7 +323,7 @@ export async function registerRoutes(server: Server, app: Express) {
   });
 
   // Fetch ALL enabled feeds
-  app.post("/api/feeds/fetch-all", async (_req, res) => {
+  app.post("/api/feeds/fetch-all", requireAuth, async (_req, res) => {
     const feeds = await storage.getFeeds();
     const enabled = feeds.filter(f => f.enabled);
     const results: any[] = [];
@@ -559,14 +580,14 @@ export async function registerRoutes(server: Server, app: Express) {
   // Email notification endpoint (stores subscriber emails in memory)
   const subscribers: Set<string> = new Set();
 
-  app.post("/api/threat-advisor/subscribe", (req, res) => {
+  app.post("/api/threat-advisor/subscribe", requireAuth, (req, res) => {
     const { email } = req.body;
     if (!email || !email.includes('@')) return res.status(400).json({ error: "Valid email required" });
     subscribers.add(email);
     res.json({ success: true, message: `Subscribed ${email} to threat advisories`, totalSubscribers: subscribers.size });
   });
 
-  app.delete("/api/threat-advisor/subscribe", (req, res) => {
+  app.delete("/api/threat-advisor/subscribe", requireAuth, (req, res) => {
     const { email } = req.body;
     subscribers.delete(email);
     res.json({ success: true, message: "Unsubscribed" });

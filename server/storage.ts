@@ -1,6 +1,20 @@
 import type { User, InsertUser, Feed, InsertFeed, Indicator, InsertIndicator, Search, InsertSearch, Stat, InsertStat } from "@shared/schema";
 import crypto from "crypto";
 
+// Password hashing helpers
+export function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+
+export function verifyPassword(password: string, stored: string): boolean {
+  const [salt, hash] = stored.split(":");
+  if (!salt || !hash) return false;
+  const hashToVerify = crypto.scryptSync(password, salt, 64).toString("hex");
+  return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(hashToVerify, "hex"));
+}
+
 export interface IStorage {
   // Users
   getUser(id: number): Promise<User | undefined>;
@@ -89,7 +103,7 @@ export class MemStorage implements IStorage {
   async getUserByApiKey(key: string) { return Array.from(this.users.values()).find(u => u.apiKey === key); }
   async createUser(user: InsertUser): Promise<User> {
     const id = this.userId++;
-    const newUser: User = { id, email: user.email, name: user.name ?? null, provider: user.provider ?? "email", avatarUrl: user.avatarUrl ?? null, apiKey: null, role: user.role ?? "user", password: user.password ?? null, createdAt: user.createdAt };
+    const newUser: User = { id, email: user.email, name: user.name ?? null, provider: user.provider ?? "email", avatarUrl: user.avatarUrl ?? null, apiKey: null, role: user.role ?? "user", password: user.password ? hashPassword(user.password) : null, createdAt: user.createdAt };
     this.users.set(id, newUser);
     return newUser;
   }

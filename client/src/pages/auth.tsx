@@ -227,7 +227,7 @@ export default function Auth() {
                   className="w-full flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-full border border-border bg-card hover:bg-accent text-sm font-medium transition-colors"
                   data-testid="oauth-google"
                 >
-                  <SiGoogle size={16} /> Continue with Google
+                  <SiGoogle size={16} /> Continue with Google (Demo)
                 </button>
                 <button
                   onClick={() => handleOAuth("github")}
@@ -235,7 +235,7 @@ export default function Auth() {
                   className="w-full flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-full border border-border bg-card hover:bg-accent text-sm font-medium transition-colors"
                   data-testid="oauth-github"
                 >
-                  <SiGithub size={16} /> Continue with GitHub
+                  <SiGithub size={16} /> Continue with GitHub (Demo)
                 </button>
                 <button
                   onClick={() => handleOAuth("microsoft")}
@@ -243,9 +243,13 @@ export default function Auth() {
                   className="w-full flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-full border border-border bg-card hover:bg-accent text-sm font-medium transition-colors"
                   data-testid="oauth-microsoft"
                 >
-                  <MicrosoftIcon size={16} /> Continue with Microsoft
+                  <MicrosoftIcon size={16} /> Continue with Microsoft (Demo)
                 </button>
               </div>
+
+              <p className="text-[10px] text-muted-foreground text-center -mt-3 mb-4">
+                OAuth buttons create demo accounts. Real OAuth integration coming soon.
+              </p>
 
               {/* Divider */}
               <div className="flex items-center gap-3 mb-6">

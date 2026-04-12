@@ -6,11 +6,14 @@ services:
     container_name: opencti-app
     ports:
       - "5000:5000"
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://opencti:opencti_secret@opencti-db:5432/opencti
       - OTX_API_KEY=${OTX_API_KEY:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - SESSION_SECRET=${SESSION_SECRET:-change-this-to-a-random-string}
       - SMTP_HOST=${SMTP_HOST:-}
       - SMTP_PORT=${SMTP_PORT:-587}
       - SMTP_SECURE=${SMTP_SECURE:-false}

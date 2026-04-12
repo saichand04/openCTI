@@ -14,9 +14,18 @@ export async function apiRequest(
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
+  const headers: Record<string, string> = {};
+  if (data) headers["Content-Type"] = "application/json";
+  try {
+    const stored = sessionStorage.getItem("opencti_user");
+    if (stored) {
+      const user = JSON.parse(stored);
+      if (user?.id) headers["X-User-Id"] = String(user.id);
+    }
+  } catch {}
   const res = await fetch(`${API_BASE}${url}`, {
     method,
-    headers: data ? { "Content-Type": "application/json" } : {},
+    headers,
     body: data ? JSON.stringify(data) : undefined,
   });
 

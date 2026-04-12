@@ -73,7 +73,7 @@ function AppLogo({ size = 28 }: { size?: number }) {
 
 // Icon-only sidebar matching reference
 function IconSidebar() {
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
   const { user } = useAuth();
 
   const navItems = [
@@ -105,21 +105,25 @@ function IconSidebar() {
             (item.href !== "/dashboard" && location.startsWith(item.href));
           const Icon = item.icon;
           return (
-            <Link key={item.href} href={item.href}>
-              <div
-                className={`relative w-10 h-10 flex items-center justify-center rounded cursor-pointer transition-colors group ${
-                  isActive
-                    ? "bg-primary/15 text-primary"
-                    : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                }`}
-                data-testid={`nav-${item.label.toLowerCase()}`}
-              >
-                <Icon size={18} strokeWidth={isActive ? 2.2 : 1.8} />
-                <div className="absolute left-full ml-2 px-2 py-1 bg-popover border border-border text-foreground text-xs rounded opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50 shadow-md">
-                  {item.label}
-                </div>
+            <a
+              key={item.href}
+              href={`#${item.href}`}
+              onClick={(e) => {
+                e.preventDefault();
+                setLocation(item.href);
+              }}
+              className={`relative w-10 h-10 flex items-center justify-center rounded cursor-pointer transition-colors group no-underline ${
+                isActive
+                  ? "bg-primary/15 text-primary"
+                  : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              }`}
+              data-testid={`nav-${item.label.toLowerCase()}`}
+            >
+              <Icon size={18} strokeWidth={isActive ? 2.2 : 1.8} />
+              <div className="absolute left-full ml-2 px-2 py-1 bg-popover border border-border text-foreground text-xs rounded opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50 shadow-md">
+                {item.label}
               </div>
-            </Link>
+            </a>
           );
         })}
       </nav>
@@ -132,10 +136,13 @@ function IconSidebar() {
 }
 
 function ThemeToggle() {
-  const [dark, setDark] = useState(true);
+  const [dark, setDark] = useState(() => {
+    return localStorage.getItem("opencti_theme") !== "light";
+  });
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
+    localStorage.setItem("opencti_theme", dark ? "dark" : "light");
   }, [dark]);
 
   return (
@@ -151,7 +158,18 @@ function ThemeToggle() {
 }
 
 function AppLayout() {
+  const [, setLocation] = useLocation();
   const { user, logout } = useAuth();
+
+  useEffect(() => {
+    if (!user) {
+      setLocation("/auth");
+    }
+  }, [user, setLocation]);
+
+  if (!user) {
+    return null;
+  }
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -202,14 +220,33 @@ function AppLayout() {
 }
 
 function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(() => {
+    try {
+      const stored = sessionStorage.getItem("opencti_user");
+      return stored ? JSON.parse(stored) : null;
+    } catch { return null; }
+  });
 
   useEffect(() => {
-    document.documentElement.classList.add("dark");
+    if (user) {
+      sessionStorage.setItem("opencti_user", JSON.stringify(user));
+    } else {
+      sessionStorage.removeItem("opencti_user");
+    }
+  }, [user]);
+
+  useEffect(() => {
+    const savedTheme = localStorage.getItem("opencti_theme");
+    if (savedTheme === "light") {
+      document.documentElement.classList.remove("dark");
+    } else {
+      document.documentElement.classList.add("dark");
+    }
   }, []);
 
   const logout = () => {
     setUser(null);
+    sessionStorage.removeItem("opencti_user");
     window.location.hash = "#/";
   };
 
